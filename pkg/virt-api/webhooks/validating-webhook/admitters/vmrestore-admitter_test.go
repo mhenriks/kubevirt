@@ -23,6 +23,8 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"k8s.io/utils/pointer"
+
 	"github.com/golang/mock/gomock"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -466,31 +468,6 @@ var _ = Describe("Validating VirtualMachineRestore Admitter", func() {
 				Expect(resp.Result.Details.Causes[0].Field).To(Equal("spec.target.apiGroup"))
 			})
 
-			It("should reject invalid source ID", func() {
-				restore := &snapshotv1.VirtualMachineRestore{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "restore",
-						Namespace: "default",
-					},
-					Spec: snapshotv1.VirtualMachineRestoreSpec{
-						Target: corev1.TypedLocalObjectReference{
-							APIGroup: &apiGroup,
-							Kind:     "VirtualMachine",
-							Name:     vmName,
-						},
-						VirtualMachineSnapshotName: vmSnapshotName,
-					},
-				}
-
-				vm.UID = "foo"
-
-				ar := createRestoreAdmissionReview(restore)
-				resp := createTestVMRestoreAdmitter(config, vm, snapshot).Admit(ar)
-				Expect(resp.Allowed).To(BeFalse())
-				Expect(resp.Result.Details.Causes).To(HaveLen(1))
-				Expect(resp.Result.Details.Causes[0].Field).To(Equal("spec.virtualMachineSnapshotName"))
-			})
-
 			It("should reject if restore in progress", func() {
 				restore := &snapshotv1.VirtualMachineRestore{
 					ObjectMeta: metav1.ObjectMeta{
@@ -549,6 +526,28 @@ var _ = Describe("Validating VirtualMachineRestore Admitter", func() {
 
 				ar := createRestoreAdmissionReview(restore)
 				resp := createTestVMRestoreAdmitter(config, vm, snapshot).Admit(ar)
+				Expect(resp.Allowed).To(BeTrue())
+			})
+
+			It("should accept when target VM is different from source VM", func() {
+				newVM := vm.DeepCopy()
+				vm.Name = "new-test-vm"
+				newVM.Spec.Running = pointer.BoolPtr(false)
+				newVM.UID = "new-uid"
+
+				restore := &snapshotv1.VirtualMachineRestore{
+					Spec: snapshotv1.VirtualMachineRestoreSpec{
+						Target: corev1.TypedLocalObjectReference{
+							APIGroup: &apiGroup,
+							Kind:     "VirtualMachine",
+							Name:     newVM.Name,
+						},
+						VirtualMachineSnapshotName: vmSnapshotName,
+					},
+				}
+
+				ar := createRestoreAdmissionReview(restore)
+				resp := createTestVMRestoreAdmitter(config, newVM, snapshot).Admit(ar)
 				Expect(resp.Allowed).To(BeTrue())
 			})
 		})

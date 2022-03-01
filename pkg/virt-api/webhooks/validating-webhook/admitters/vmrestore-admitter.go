@@ -259,14 +259,5 @@ func (admitter *VMRestoreAdmitter) validateSnapshot(field *k8sfield.Path, namesp
 		causes = append(causes, cause)
 	}
 
-	if targetUID != nil && snapshot.Status != nil && snapshot.Status.SourceUID != nil && *targetUID != *snapshot.Status.SourceUID {
-		cause := metav1.StatusCause{
-			Type:    metav1.CauseTypeFieldValueInvalid,
-			Message: fmt.Sprintf("VirtualMachineSnapshot source UID is %q but target UID is %q", *snapshot.Status.SourceUID, *targetUID),
-			Field:   field.String(),
-		}
-		causes = append(causes, cause)
-	}
-
 	return causes, nil
 }
