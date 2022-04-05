@@ -182,13 +182,8 @@ func (admitter *VMRestoreAdmitter) Admit(ar *admissionv1.AdmissionReview) *admis
 func (admitter *VMRestoreAdmitter) validateCreateVM(field *k8sfield.Path, namespace, name string) ([]metav1.StatusCause, *types.UID, error) {
 	vm, err := admitter.Client.VirtualMachine(namespace).Get(name, &metav1.GetOptions{})
 	if errors.IsNotFound(err) {
-		return []metav1.StatusCause{
-			{
-				Type:    metav1.CauseTypeFieldValueInvalid,
-				Message: fmt.Sprintf("VirtualMachine %q does not exist", name),
-				Field:   field.String(),
-			},
-		}, nil, nil
+		// If the target VM does not exist it would be automatically created by the restore controller
+		return nil, nil, nil
 	}
 
 	if err != nil {
