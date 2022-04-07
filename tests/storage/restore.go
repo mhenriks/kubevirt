@@ -40,6 +40,9 @@ const (
 	catTestDataMessageCmd     = "cat /test/data/message\n"
 	stoppingVM                = "Stopping VM"
 	creatingSnapshot          = "creating snapshot"
+
+	newVmName                    = "new-vm"
+	changeMacAddressCloningPatch = `{"op": "replace", "path": "/spec/template/spec/domain/devices/interfaces/0/macAddress", "value": ""}`
 )
 
 var _ = SIGDescribe("[Serial]VirtualMachineRestore Tests", func() {
@@ -47,23 +50,27 @@ var _ = SIGDescribe("[Serial]VirtualMachineRestore Tests", func() {
 	var err error
 	var virtClient kubecli.KubevirtClient
 
+	var changeNameCloningPatch string
+
 	groupName := "kubevirt.io"
 
 	BeforeEach(func() {
+		changeNameCloningPatch = fmt.Sprintf(`{"op": "replace", "path": "/metadata/name", "value": "%s"}`, newVmName)
+
 		virtClient, err = kubecli.GetKubevirtClient()
 		util.PanicOnError(err)
 	})
 
-	createRestoreDef := func(vm *v1.VirtualMachine, snapshotName string) *snapshotv1.VirtualMachineRestore {
+	createRestoreDef := func(vmName string, snapshotName string) *snapshotv1.VirtualMachineRestore {
 		return &snapshotv1.VirtualMachineRestore{
 			ObjectMeta: metav1.ObjectMeta{
-				Name: "restore-" + vm.Name,
+				Name: "restore-" + vmName,
 			},
 			Spec: snapshotv1.VirtualMachineRestoreSpec{
 				Target: corev1.TypedLocalObjectReference{
 					APIGroup: &groupName,
 					Kind:     "VirtualMachine",
-					Name:     vm.Name,
+					Name:     vmName,
 				},
 				VirtualMachineSnapshotName: snapshotName,
 			},
@@ -208,12 +215,19 @@ var _ = SIGDescribe("[Serial]VirtualMachineRestore Tests", func() {
 			Status: v1.VirtualMachineStatus{},
 		}
 
+		// Delete MAC addresses
+		for i, _ := range newVM.Spec.Template.Spec.Domain.Devices.Interfaces {
+			newVM.Spec.Template.Spec.Domain.Devices.Interfaces[i].MacAddress = ""
+		}
+
+		// Change name label
 		for key, _ := range newVM.Labels {
 			if key == "name" {
 				newVM.Labels[key] = newVM.Name
 			}
 		}
 
+		// Change volume names
 		changedDVNames := make(map[string]string)
 
 		for i, _ := range newVM.Spec.DataVolumeTemplates {
@@ -256,7 +270,7 @@ var _ = SIGDescribe("[Serial]VirtualMachineRestore Tests", func() {
 			It("[test_id:5255]should reject restore", func() {
 				vm, err = virtClient.VirtualMachine(util.NamespaceTestDefault).Create(vm)
 				Expect(err).ToNot(HaveOccurred())
-				restore := createRestoreDef(vm, "foobar")
+				restore := createRestoreDef(vm.Name, "foobar")
 
 				_, err := virtClient.VirtualMachineRestore(vm.Namespace).Create(context.Background(), restore, metav1.CreateOptions{})
 				Expect(err).To(HaveOccurred())
@@ -281,7 +295,7 @@ var _ = SIGDescribe("[Serial]VirtualMachineRestore Tests", func() {
 				Expect(err).ToNot(HaveOccurred())
 				snapshot = createSnapshot(vm)
 
-				restore := createRestoreDef(vm, snapshot.Name)
+				restore := createRestoreDef(vm.Name, snapshot.Name)
 
 				restore, err = virtClient.VirtualMachineRestore(vm.Namespace).Create(context.Background(), restore, metav1.CreateOptions{})
 				Expect(err).ToNot(HaveOccurred())
@@ -336,7 +350,7 @@ var _ = SIGDescribe("[Serial]VirtualMachineRestore Tests", func() {
 					return true
 				}, 180*time.Second, time.Second).Should(BeTrue())
 
-				restore := createRestoreDef(vm, snapshot.Name)
+				restore := createRestoreDef(vm.Name, snapshot.Name)
 
 				restore, err = virtClient.VirtualMachineRestore(vm.Namespace).Create(context.Background(), restore, metav1.CreateOptions{})
 				Expect(err).ToNot(HaveOccurred())
@@ -356,7 +370,7 @@ var _ = SIGDescribe("[Serial]VirtualMachineRestore Tests", func() {
 				vm, err := virtClient.VirtualMachine(vm.Namespace).Patch(vm.Name, types.JSONPatchType, patch, &metav1.PatchOptions{})
 				Expect(err).ToNot(HaveOccurred())
 
-				restore := createRestoreDef(vm, snapshot.Name)
+				restore := createRestoreDef(vm.Name, snapshot.Name)
 
 				_, err = virtClient.VirtualMachineRestore(vm.Namespace).Create(context.Background(), restore, metav1.CreateOptions{})
 				Expect(err).To(HaveOccurred())
@@ -402,7 +416,7 @@ var _ = SIGDescribe("[Serial]VirtualMachineRestore Tests", func() {
 				Expect(err).ToNot(HaveOccurred())
 				webhook = wh
 
-				restore := createRestoreDef(vm, snapshot.Name)
+				restore := createRestoreDef(vm.Name, snapshot.Name)
 
 				restore, err = virtClient.VirtualMachineRestore(vm.Namespace).Create(context.Background(), restore, metav1.CreateOptions{})
 				Expect(err).ToNot(HaveOccurred())
@@ -450,7 +464,7 @@ var _ = SIGDescribe("[Serial]VirtualMachineRestore Tests", func() {
 				defer deleteVM(newVM)
 
 				By("Creating a VM restore")
-				restore := createRestoreDef(newVM, snapshot.Name)
+				restore := createRestoreDef(newVM.Name, snapshot.Name)
 				restore, err = virtClient.VirtualMachineRestore(newVM.Namespace).Create(context.Background(), restore, metav1.CreateOptions{})
 				Expect(err).ToNot(HaveOccurred())
 				defer deleteRestore(restore)
@@ -470,6 +484,69 @@ var _ = SIGDescribe("[Serial]VirtualMachineRestore Tests", func() {
 
 				By("Making sure new VM is runnable")
 				tests.StartVMAndExpectRunning(virtClient, vm)
+			})
+
+			Context("restore to a new VM that does not exist", func() {
+
+				var (
+					newVM   *v1.VirtualMachine
+					restore *snapshotv1.VirtualMachineRestore
+				)
+
+				BeforeEach(func() {
+					restore = createRestoreDef(newVmName, snapshot.Name)
+				})
+
+				expectNewVMCreation := func(vmName string) (createdVM *v1.VirtualMachine) {
+					Eventually(func() error {
+						createdVM, err = virtClient.VirtualMachine(vm.Namespace).Get(vmName, &metav1.GetOptions{})
+						return err
+					}, 90*time.Second, 5*time.Second).ShouldNot(HaveOccurred(), fmt.Sprintf("new VM (%s) is not being created", newVmName))
+
+					return createdVM
+				}
+
+				waitRestoreComplete := func(r *snapshotv1.VirtualMachineRestore, vm *v1.VirtualMachine) *snapshotv1.VirtualMachineRestore {
+					r = waitRestoreComplete(r, vm)
+					Expect(r.Status.Restores).To(BeEmpty())
+					Expect(r.Status.DeletedDataVolumes).To(BeEmpty())
+					return r
+				}
+
+				It("with changed name and MAC address", func() {
+					By("Creating a VM restore with patches to change name and MAC address")
+					restore.Spec.Patches = []string{changeNameCloningPatch, changeMacAddressCloningPatch}
+					restore, err = virtClient.VirtualMachineRestore(vm.Namespace).Create(context.Background(), restore, metav1.CreateOptions{})
+					Expect(err).ToNot(HaveOccurred())
+					defer deleteRestore(restore)
+
+					By("Making sure that new VM is finally created")
+					newVM = expectNewVMCreation(newVmName)
+					defer deleteVM(newVM)
+
+					By("Waiting for VM restore to complete")
+					restore = waitRestoreComplete(restore, newVM)
+
+					By("Verifying both VMs exist")
+					vm, err = virtClient.VirtualMachine(vm.Namespace).Get(vm.Name, &metav1.GetOptions{})
+					Expect(err).ShouldNot(HaveOccurred())
+					newVM, err = virtClient.VirtualMachine(newVM.Namespace).Get(newVM.Name, &metav1.GetOptions{})
+					Expect(err).ShouldNot(HaveOccurred())
+
+					By("Verifying newly created VM is set properly")
+					Expect(newVM.Name).To(Equal(newVmName), "newly created VM should have correct name")
+					newVMInterfaces := newVM.Spec.Template.Spec.Domain.Devices.Interfaces
+					Expect(newVMInterfaces).ToNot(BeEmpty())
+
+					By("Verifying both VMs have different spec")
+					oldVMInterfaces := vm.Spec.Template.Spec.Domain.Devices.Interfaces
+					Expect(oldVMInterfaces).ToNot(BeEmpty())
+					Expect(newVMInterfaces[0].MacAddress).ToNot(Equal(oldVMInterfaces[0].MacAddress))
+
+					By("Making sure new VM is runnable")
+					tests.StartVMAndExpectRunning(virtClient, newVM)
+				})
+
 			})
 		})
 	})
@@ -658,6 +735,15 @@ var _ = SIGDescribe("[Serial]VirtualMachineRestore Tests", func() {
 				}
 			}
 
+			createRestoreDef := func(vmName string, snapshotName string, restoreToDifferentVM bool) *snapshotv1.VirtualMachineRestore {
+				r := createRestoreDef(vmName, snapshotName)
+				if restoreToDifferentVM {
+					r.Spec.Patches = []string{changeMacAddressCloningPatch}
+				}
+
+				return r
+			}
+
 			doRestore := func(device string, login console.LoginToFunction, onlineSnapshot bool, expectedRestores int, restoreToDifferentVM bool) {
 				var targetVM *v1.VirtualMachine
 				var targetVMI *v1.VirtualMachineInstance
@@ -710,7 +796,7 @@ var _ = SIGDescribe("[Serial]VirtualMachineRestore Tests", func() {
 				targetVM = tests.StopVirtualMachine(targetVM)
 
 				By("Restoring VM")
-				restore = createRestoreDef(targetVM, snapshot.Name)
+				restore = createRestoreDef(targetVM.Name, snapshot.Name, restoreToDifferentVM)
 
 				restore, err = virtClient.VirtualMachineRestore(vm.Namespace).Create(context.Background(), restore, metav1.CreateOptions{})
 				Expect(err).ToNot(HaveOccurred())
@@ -751,7 +837,7 @@ var _ = SIGDescribe("[Serial]VirtualMachineRestore Tests", func() {
 
 				for i := 0; i < 2; i++ {
 					By(fmt.Sprintf("Restoring VM iteration %d", i))
-					restore = createRestoreDef(vm, snapshot.Name)
+					restore = createRestoreDef(vm.Name, snapshot.Name, false)
 
 					restore, err = virtClient.VirtualMachineRestore(vm.Namespace).Create(context.Background(), restore, metav1.CreateOptions{})
 					Expect(err).ToNot(HaveOccurred())
@@ -1054,7 +1140,7 @@ var _ = SIGDescribe("[Serial]VirtualMachineRestore Tests", func() {
 				Expect(err).ToNot(HaveOccurred())
 				webhook = wh
 
-				restore := createRestoreDef(vm, snapshot.Name)
+				restore := createRestoreDef(vm.Name, snapshot.Name, false)
 
 				restore, err = virtClient.VirtualMachineRestore(vm.Namespace).Create(context.Background(), restore, metav1.CreateOptions{})
 				Expect(err).ToNot(HaveOccurred())
@@ -1247,7 +1333,7 @@ var _ = SIGDescribe("[Serial]VirtualMachineRestore Tests", func() {
 				targetVM = tests.StopVirtualMachine(targetVM)
 
 				By("Restoring VM")
-				restore = createRestoreDef(targetVM, snapshot.Name)
+				restore = createRestoreDef(targetVM.Name, snapshot.Name, restoreToNewVM)
 				restore, err = virtClient.VirtualMachineRestore(targetVM.Namespace).Create(context.Background(), restore, metav1.CreateOptions{})
 				Expect(err).ToNot(HaveOccurred())
 				restore = waitRestoreComplete(restore, targetVM)

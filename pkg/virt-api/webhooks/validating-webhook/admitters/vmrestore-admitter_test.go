@@ -155,7 +155,7 @@ var _ = Describe("Validating VirtualMachineRestore Admitter", func() {
 			Expect(resp.Result.Details.Causes[0].Field).To(Equal("spec.target.apiGroup"))
 		})
 
-		It("should reject when VM does not exist", func() {
+		It("should allow when VM does not exist", func() {
 			restore := &snapshotv1.VirtualMachineRestore{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "restore",
@@ -173,12 +173,10 @@ var _ = Describe("Validating VirtualMachineRestore Admitter", func() {
 
 			ar := createRestoreAdmissionReview(restore)
 			resp := createTestVMRestoreAdmitter(config, nil, snapshot).Admit(ar)
-			Expect(resp.Allowed).To(BeFalse())
-			Expect(resp.Result.Details.Causes).To(HaveLen(1))
-			Expect(resp.Result.Details.Causes[0].Field).To(Equal("spec.target"))
+			Expect(resp.Allowed).To(BeTrue())
 		})
 
-		It("should reject when VM and snapshot do not exist", func() {
+		It("should reject when snapshot does not exist", func() {
 			restore := &snapshotv1.VirtualMachineRestore{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "restore",
@@ -197,9 +195,8 @@ var _ = Describe("Validating VirtualMachineRestore Admitter", func() {
 			ar := createRestoreAdmissionReview(restore)
 			resp := createTestVMRestoreAdmitter(config, nil).Admit(ar)
 			Expect(resp.Allowed).To(BeFalse())
-			Expect(resp.Result.Details.Causes).To(HaveLen(2))
-			Expect(resp.Result.Details.Causes[0].Field).To(Equal("spec.target"))
-			Expect(resp.Result.Details.Causes[1].Field).To(Equal("spec.virtualMachineSnapshotName"))
+			Expect(resp.Result.Details.Causes).To(HaveLen(1))
+			Expect(resp.Result.Details.Causes[0].Field).To(Equal("spec.virtualMachineSnapshotName"))
 		})
 
 		It("should reject spec update", func() {
