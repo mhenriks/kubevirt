@@ -32,7 +32,6 @@ import (
 	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 
 	kubevirtv1 "kubevirt.io/api/core/v1"
 	snapshotv1 "kubevirt.io/api/snapshot/v1alpha1"
@@ -53,7 +52,6 @@ const (
 )
 
 type restoreTarget interface {
-	UID() types.UID
 	Ready() (bool, error)
 	Reconcile() (bool, error)
 	Cleanup() error
@@ -312,11 +310,11 @@ func (ctrl *VMRestoreController) getBindingMode(pvc *corev1.PersistentVolumeClai
 	return sc.VolumeBindingMode, nil
 }
 
-func (t *vmRestoreTarget) UID() types.UID {
-	return t.vm.UID
-}
-
 func (t *vmRestoreTarget) UpdateDoneRestore() (bool, error) {
+	if t.vm == nil {
+		return true, nil
+	}
+
 	if t.vm.Status.RestoreInProgress == nil || *t.vm.Status.RestoreInProgress != t.vmRestore.Name {
 		return false, nil
 	}
@@ -328,6 +326,10 @@ func (t *vmRestoreTarget) UpdateDoneRestore() (bool, error) {
 }
 
 func (t *vmRestoreTarget) UpdateRestoreInProgress() error {
+	if t.vm == nil {
+		return nil
+	}
+
 	if t.vm.Status.RestoreInProgress != nil && *t.vm.Status.RestoreInProgress != t.vmRestore.Name {
 		return fmt.Errorf("vm restore %s in progress", *t.vm.Status.RestoreInProgress)
 	}
@@ -346,6 +348,10 @@ func (t *vmRestoreTarget) UpdateRestoreInProgress() error {
 }
 
 func (t *vmRestoreTarget) Ready() (bool, error) {
+	if t.vm == nil {
+		return true, nil
+	}
+
 	log.Log.Object(t.vmRestore).V(3).Info("Checking VM ready")
 
 	rs, err := t.vm.RunStrategy()
@@ -375,8 +381,10 @@ func (t *vmRestoreTarget) Reconcile() (bool, error) {
 
 	restoreID := fmt.Sprintf("%s-%s", t.vmRestore.Name, t.vmRestore.UID)
 
-	if lastRestoreID, ok := t.vm.Annotations[lastRestoreAnnotation]; ok && lastRestoreID == restoreID {
-		return false, nil
+	if t.vm != nil {
+		if lastRestoreID, ok := t.vm.Annotations[lastRestoreAnnotation]; ok && lastRestoreID == restoreID {
+			return false, nil
+		}
 	}
 
 	content, err := t.controller.getSnapshotContent(t.vmRestore)
@@ -480,7 +488,7 @@ func (t *vmRestoreTarget) Reconcile() (bool, error) {
 		}
 	}
 
-	if updatedStatus {
+	if t.vm != nil && updatedStatus {
 		// find DataVolumes that will no longer exist
 		for _, cdv := range t.vm.Spec.DataVolumeTemplates {
 			found := false
@@ -499,8 +507,19 @@ func (t *vmRestoreTarget) Reconcile() (bool, error) {
 		return true, nil
 	}
 
-	newVM := t.vm.DeepCopy()
-	newVM.Spec = snapshotVM.Spec
+	var newVM *kubevirtv1.VirtualMachine
+	if t.vm == nil {
+		newVM = snapshotVM.DeepCopy()
+		newVM.ObjectMeta = metav1.ObjectMeta{
+			Name: t.vmRestore.Spec.Target.Name,
+			// maybe other stuff
+
+		}
+	} else {
+		newVM = t.vm.DeepCopy()
+		newVM.Spec = snapshotVM.Spec
+	}
+
 	// update Running state in case snapshot was on online VM
 	if newVM.Spec.RunStrategy != nil {
 		runStrategyHalted := kubevirtv1.RunStrategyHalted
@@ -521,15 +540,26 @@ func (t *vmRestoreTarget) Reconcile() (bool, error) {
 		return false, fmt.Errorf("error patching VM %s: %v", newVM.Name, err)
 	}
 
-	_, err = t.controller.Client.VirtualMachine(newVM.Namespace).Update(newVM)
-	if err != nil {
-		return false, err
+	if t.vm == nil {
+		_, err = t.controller.Client.VirtualMachine(t.vmRestore.Namespace).Create(newVM)
+		if err != nil {
+			return false, err
+		}
+	} else {
+		_, err = t.controller.Client.VirtualMachine(newVM.Namespace).Update(newVM)
+		if err != nil {
+			return false, err
+		}
 	}
 
 	return true, nil
 }
 
 func (t *vmRestoreTarget) Own(obj metav1.Object) {
+	if t.vm == nil {
+		return
+	}
+
 	b := true
 	obj.SetOwnerReferences([]metav1.OwnerReference{
 		{
@@ -615,28 +645,6 @@ func (ctrl *VMRestoreController) getVM(namespace, name string) (vm *kubevirtv1.V
 	return obj.(*kubevirtv1.VirtualMachine).DeepCopy(), true, nil
 }
 
-func (ctrl *VMRestoreController) createVM(vmRestore *snapshotv1.VirtualMachineRestore) (*kubevirtv1.VirtualMachine, error) {
-	snapshotContent, err := ctrl.getSnapshotContent(vmRestore)
-	if err != nil {
-		return nil, err
-	}
-
-	vm := snapshotContent.Spec.Source.VirtualMachine.DeepCopy()
-
-	vm, err = patchVM(vm, vmRestore.Spec.Patches)
-	if err != nil {
-		return nil, err
-	}
-
-	vm, err = ctrl.Client.VirtualMachine(vm.Namespace).Create(vm)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create vm %+v: %v", vm, err)
-	}
-	log.Log.Object(vmRestore).Infof("restore target (vm name: %s) did not exist, therefore created successfully", vm.Name)
-
-	return vm, nil
-}
-
 func patchVM(vm *kubevirtv1.VirtualMachine, patches []string) (*kubevirtv1.VirtualMachine, error) {
 	if len(patches) == 0 {
 		return vm, nil
@@ -698,10 +706,7 @@ func (ctrl *VMRestoreController) getTarget(vmRestore *snapshotv1.VirtualMachineR
 		}
 
 		if !exists {
-			vm, err = ctrl.createVM(vmRestore)
-			if err != nil {
-				return nil, err
-			}
+			vm = nil
 		}
 
 		return &vmRestoreTarget{
