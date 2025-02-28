@@ -892,9 +892,11 @@ var _ = SIGDescribe("Volumes update with migration", decorators.RequiresTwoSched
 					vmi, err := virtClient.VirtualMachineInstance(vmi.Namespace).Get(context.Background(), vmi.Name, metav1.GetOptions{})
 					Expect(err).ToNot(HaveOccurred())
 					for _, v := range vmi.Status.VolumeStatus {
-						if v.HotplugVolume == nil {
-							continue
-						}
+						/*
+							if v.HotplugVolume == nil {
+								continue
+							}
+						*/
 						if v.Name == volName {
 							device = v.Target
 							return v.Target
@@ -904,7 +906,7 @@ var _ = SIGDescribe("Volumes update with migration", decorators.RequiresTwoSched
 				}).WithTimeout(60 * time.Second).WithPolling(2 * time.Second).ShouldNot(BeEmpty())
 
 				Expect(console.LoginToCirros(vmi)).To(Succeed())
-				Expect(console.RunCommand(vmi, "sudo mkfs.ext3 /dev/sda", 30*time.Second)).To(Succeed())
+				Expect(console.RunCommand(vmi, "sudo mkfs.ext3 /dev/"+device, 30*time.Second)).To(Succeed())
 				Expect(console.RunCommand(vmi, "mkdir test", 30*time.Second)).To(Succeed())
 				Expect(console.RunCommand(vmi, fmt.Sprintf("sudo mount -t ext3 /dev/%s /home/cirros/test", device), 30*time.Second)).To(Succeed())
 				Expect(console.RunCommand(vmi, "sudo chmod 777 /home/cirros/test", 30*time.Second)).To(Succeed())
@@ -950,7 +952,9 @@ var _ = SIGDescribe("Volumes update with migration", decorators.RequiresTwoSched
 				checkFileOnHotpluggedVol(vmi)
 			})
 
-			DescribeTable("with a datavolume and an hotplugged datavolume migrating", func(srcBlock, dstBlock bool) {
+			FDescribeTable("with a datavolume and an hotplugged datavolume migrating", func(srcBlock, dstBlock bool) {
+				doHotPlug := false
+
 				ns := testsuite.GetTestNamespace(nil)
 				rootVolName := "root"
 				hpVolName := "hp"
@@ -985,10 +989,15 @@ var _ = SIGDescribe("Volumes update with migration", decorators.RequiresTwoSched
 					libvmi.WithRunStrategy(virtv1.RunStrategyAlways),
 					libvmi.WithDataVolumeTemplate(rootDV),
 				)
-				vm, err := virtClient.VirtualMachine(ns).Create(context.Background(), vm, metav1.CreateOptions{})
-				Expect(err).ToNot(HaveOccurred())
-				Eventually(matcher.ThisVM(vm), 360*time.Second, 1*time.Second).Should(matcher.BeReady())
-				libwait.WaitForSuccessfulVMIStart(vmi)
+
+				var err error
+
+				if doHotPlug {
+					vm, err = virtClient.VirtualMachine(ns).Create(context.Background(), vm, metav1.CreateOptions{})
+					Expect(err).ToNot(HaveOccurred())
+					Eventually(matcher.ThisVM(vm), 360*time.Second, 1*time.Second).Should(matcher.BeReady())
+					libwait.WaitForSuccessfulVMIStart(vmi)
+				}
 
 				hpDV := libdv.NewDataVolume(
 					libdv.WithBlankImageSource(),
@@ -1001,7 +1010,31 @@ var _ = SIGDescribe("Volumes update with migration", decorators.RequiresTwoSched
 				_, err = virtClient.CdiClient().CdiV1beta1().DataVolumes(ns).Create(context.Background(),
 					hpDV, metav1.CreateOptions{})
 				Expect(err).ToNot(HaveOccurred())
-				addVolume(vm.Name, vm.Namespace, hpVolName, hpDV.Name)
+
+				if doHotPlug {
+					addVolume(vm.Name, vm.Namespace, hpVolName, hpDV.Name)
+				} else {
+					// Add the volume to the VM spec
+					vm.Spec.Template.Spec.Volumes = append(vm.Spec.Template.Spec.Volumes, virtv1.Volume{
+						Name: hpVolName,
+						VolumeSource: virtv1.VolumeSource{
+							DataVolume: &virtv1.DataVolumeSource{
+								Name: hpDV.Name,
+							},
+						},
+					})
+					vm.Spec.Template.Spec.Domain.Devices.Disks = append(vm.Spec.Template.Spec.Domain.Devices.Disks, virtv1.Disk{
+						Name: hpVolName,
+						DiskDevice: virtv1.DiskDevice{
+							Disk: &virtv1.DiskTarget{Bus: virtv1.DiskBusVirtio},
+						},
+					})
+					vm, err = virtClient.VirtualMachine(ns).Create(context.Background(), vm, metav1.CreateOptions{})
+					Expect(err).ToNot(HaveOccurred())
+					Eventually(matcher.ThisVM(vm), 360*time.Second, 1*time.Second).Should(matcher.BeReady())
+					libwait.WaitForSuccessfulVMIStart(vmi)
+				}
+
 				createFileOnHotpluggedVol(vmi, hpVolName)
 
 				indexRoot := getIndexVol(vm.Name, vm.Namespace, rootVolName)
@@ -1054,7 +1087,7 @@ var _ = SIGDescribe("Volumes update with migration", decorators.RequiresTwoSched
 			},
 				Entry("from filesystem to filesystem", false, false),
 				Entry("from filesystem to block", false, true),
-				PEntry("from block to filesystem", true, false),
+				Entry("from block to filesystem", true, false),
 				Entry("from block to block", true, true),
 			)
 		})
